@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
 	// Sheets API
@@ -52,6 +54,8 @@ func main() {
 	}
 
 	http.HandleFunc("/createSpreadsheet", createSpreadsheet)
+	http.HandleFunc("/readSpreadsheet", readSpreadsheet)
+	// http.HandleFunc("/readDataFromSpreadsheet", readDataFromSpreadsheet)
 
 	fmt.Println("Starting server . . .")
 	err = http.ListenAndServe("127.0.0.1:3333", nil)
@@ -62,6 +66,90 @@ func main() {
 		fmt.Printf("error starting server: %s\n", err)
 		os.Exit(1)
 	}
+}
+
+type ReadDataFromSpreadsheetHttpRequest struct {
+	SpreadsheetTitle string
+	ObjectIds        []string
+}
+
+// func readDataFromSpreadsheet(w http.ResponseWriter, r *http.Request) {
+// 	/* Need:
+// 	string SpreadsheetTitle
+// 	string | number ID
+// 	Can be any sort of identifier for the data? Or must be ID?
+// 	Can be array? Or only singular ID?
+// 	*/
+
+// 	decoder := json.NewDecoder(r.Body)
+// 	var requestBody ReadDataFromSpreadsheetHttpRequest
+// 	err := decoder.Decode(&requestBody)
+// 	// I believe that this checks for null of newTitle field, so it is unnecessary to check it in the next step.
+// 	if err != nil {
+// 		panic(err)
+// 	}
+
+// 	spreadsheetTitle := requestBody.SpreadsheetTitle
+// 	objectIds := requestBody.ObjectIds
+
+// }
+
+type ReadSpreadsheetHttpRequest struct {
+	SpreadsheetTitle string
+}
+
+func readSpreadsheet(w http.ResponseWriter, r *http.Request) {
+
+	u, err := url.Parse(r.URL.String())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	queryParams := u.Query()
+
+	var spreadsheetTitle string = queryParams.Get("title")
+
+	spreadsheetJsonFilePath := "data/spreadsheetIDs.json"
+	spreadsheetJsonFile, err := os.ReadFile(spreadsheetJsonFilePath)
+	if err != nil {
+		log.Fatalf("Unable to read Data Spreadsheet ID file: %v", err)
+	}
+
+	var spreadsheetIdObject map[string]string
+	err = json.Unmarshal(spreadsheetJsonFile, &spreadsheetIdObject)
+	if err != nil {
+		log.Fatalf("Unable to decode Data Spreadsheet ID JSON: %v", err)
+	}
+
+	spreadsheetId := spreadsheetIdObject[spreadsheetTitle]
+
+	spreadsheetToRead, err := sheetsService.Spreadsheets.Get(spreadsheetId).Do(googleapi.QueryParameter("includeGridData", "true"))
+	if err != nil {
+		log.Fatalf("Unable to get spreadsheet from sheets service: %v", err)
+	}
+
+	var sheetTitles map[string][]string = make(map[string][]string)
+	for _, sheet := range spreadsheetToRead.Sheets {
+		sheetTitles[sheet.Properties.Title] = []string{}
+		for _, columnHeaders := range sheet.Data[0].RowData[0].Values {
+			sheetTitles[sheet.Properties.Title] = append(sheetTitles[sheet.Properties.Title], columnHeaders.FormattedValue)
+		}
+	}
+
+	var responseBody map[string]any = make(map[string]any)
+
+	responseBody["SpreadsheetTitle"] = spreadsheetToRead.Properties.Title
+	responseBody["SpreadsheetID"] = spreadsheetToRead.SpreadsheetId
+	responseBody["SheetTitlesWithColumnHeaders"] = sheetTitles
+
+	responseBodyBytes, err := json.Marshal(responseBody)
+	if err != nil {
+		log.Fatalf("Error turning response body to JSON bytes. Error: %v", err)
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(responseBodyBytes)
+
 }
 
 type SpreadsheetCreationHttpRequest struct {
