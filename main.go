@@ -53,8 +53,8 @@ func main() {
 		log.Fatalf("Unable to retrieve Drive client: %v", err)
 	}
 
-	http.HandleFunc("/createSpreadsheet", createSpreadsheet)
-	http.HandleFunc("/readSpreadsheet", readSpreadsheet)
+	http.HandleFunc("POST /createSpreadsheet", createSpreadsheet)
+	http.HandleFunc("GET /readSpreadsheet", readSpreadsheet)
 	// http.HandleFunc("/readDataFromSpreadsheet", readDataFromSpreadsheet)
 
 	fmt.Println("Starting server . . .")
