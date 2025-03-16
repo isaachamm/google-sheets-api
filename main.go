@@ -53,9 +53,12 @@ func main() {
 		log.Fatalf("Unable to retrieve Drive client: %v", err)
 	}
 
+	// It's essential to understand Google's distinction between the term Spreadsheet (A Sheets document) and Sheet (an individual sheet, of which a spreadsheet may contain many). It may be helpful to think of a spreadsheet as a DB and a sheet as a table.
+
+	http.HandleFunc("GET /readSpreadsheetMetaData", readSpreadsheetMetaData)
+	http.HandleFunc("GET /readSheetData", readSheetData)
+
 	http.HandleFunc("POST /createSpreadsheet", createSpreadsheet)
-	http.HandleFunc("GET /readSpreadsheet", readSpreadsheet)
-	// http.HandleFunc("/readDataFromSpreadsheet", readDataFromSpreadsheet)
 
 	fmt.Println("Starting server . . .")
 	err = http.ListenAndServe("127.0.0.1:3333", nil)
@@ -68,37 +71,77 @@ func main() {
 	}
 }
 
-type ReadDataFromSpreadsheetHttpRequest struct {
-	SpreadsheetTitle string
-	ObjectIds        []string
+func readSheetData(w http.ResponseWriter, r *http.Request) {
+
+	u, err := url.Parse(r.URL.String())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	queryParams := u.Query()
+
+	spreadsheetTitle := queryParams.Get("spreadsheetTitle")
+	sheetTitle := queryParams.Get("sheetTitle")
+
+	spreadsheetId := getSpreadsheetId(spreadsheetTitle)
+	spreadsheetToRead, err := sheetsService.Spreadsheets.Get(spreadsheetId).Do(googleapi.QueryParameter("includeGridData", "true"))
+	if err != nil {
+		log.Fatalf("Unable to get spreadsheet from sheets service: %v", err)
+	}
+
+	var columnHeaders []string
+	var sheetData map[int][]string = make(map[int][]string)
+	for _, sheet := range spreadsheetToRead.Sheets {
+		if sheet.Properties.Title != sheetTitle {
+			continue
+		}
+
+		if len(sheet.Data[0].RowData) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			w.Write([]byte("No data available in requested Spreadsheet: " + spreadsheetTitle + ": " + sheetTitle))
+			break
+		}
+
+		for index, row := range sheet.Data[0].RowData {
+			if index > 10 {
+				break
+			}
+
+			if index == 0 {
+				for _, rowValue := range row.Values {
+					columnHeaders = append(columnHeaders, rowValue.FormattedValue)
+				}
+				continue
+			}
+
+			for _, rowValue := range row.Values {
+				sheetData[index] = append(sheetData[index], rowValue.FormattedValue)
+			}
+		}
+		break
+	}
+
+	if columnHeaders == nil {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("Unable to find requested sheet " + sheetTitle + " in " + spreadsheetTitle))
+	}
+
+	var responseBody map[string]any = make(map[string]any)
+
+	responseBody["ColumnHeaders"] = columnHeaders
+	responseBody["SheetData"] = sheetData
+
+	responseBodyBytes, err := json.Marshal(responseBody)
+	if err != nil {
+		log.Fatalf("Error turning response body to JSON bytes. Error: %v", err)
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(responseBodyBytes)
+
 }
 
-// func readDataFromSpreadsheet(w http.ResponseWriter, r *http.Request) {
-// 	/* Need:
-// 	string SpreadsheetTitle
-// 	string | number ID
-// 	Can be any sort of identifier for the data? Or must be ID?
-// 	Can be array? Or only singular ID?
-// 	*/
-
-// 	decoder := json.NewDecoder(r.Body)
-// 	var requestBody ReadDataFromSpreadsheetHttpRequest
-// 	err := decoder.Decode(&requestBody)
-// 	// I believe that this checks for null of newTitle field, so it is unnecessary to check it in the next step.
-// 	if err != nil {
-// 		panic(err)
-// 	}
-
-// 	spreadsheetTitle := requestBody.SpreadsheetTitle
-// 	objectIds := requestBody.ObjectIds
-
-// }
-
-type ReadSpreadsheetHttpRequest struct {
-	SpreadsheetTitle string
-}
-
-func readSpreadsheet(w http.ResponseWriter, r *http.Request) {
+func readSpreadsheetMetaData(w http.ResponseWriter, r *http.Request) {
 
 	u, err := url.Parse(r.URL.String())
 	if err != nil {
@@ -110,19 +153,7 @@ func readSpreadsheet(w http.ResponseWriter, r *http.Request) {
 
 	var spreadsheetTitle string = queryParams.Get("title")
 
-	spreadsheetJsonFilePath := "data/spreadsheetIDs.json"
-	spreadsheetJsonFile, err := os.ReadFile(spreadsheetJsonFilePath)
-	if err != nil {
-		log.Fatalf("Unable to read Data Spreadsheet ID file: %v", err)
-	}
-
-	var spreadsheetIdObject map[string]string
-	err = json.Unmarshal(spreadsheetJsonFile, &spreadsheetIdObject)
-	if err != nil {
-		log.Fatalf("Unable to decode Data Spreadsheet ID JSON: %v", err)
-	}
-
-	spreadsheetId := spreadsheetIdObject[spreadsheetTitle]
+	spreadsheetId := getSpreadsheetId(spreadsheetTitle)
 
 	spreadsheetToRead, err := sheetsService.Spreadsheets.Get(spreadsheetId).Do(googleapi.QueryParameter("includeGridData", "true"))
 	if err != nil {
@@ -232,4 +263,21 @@ func createSpreadsheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+}
+
+func getSpreadsheetId(spreadsheetTitle string) string {
+	spreadsheetJsonFilePath := "data/spreadsheetIDs.json"
+	spreadsheetJsonFile, err := os.ReadFile(spreadsheetJsonFilePath)
+	if err != nil {
+		log.Fatalf("Unable to read Data Spreadsheet ID file: %v", err)
+	}
+
+	var spreadsheetIdObject map[string]string
+	err = json.Unmarshal(spreadsheetJsonFile, &spreadsheetIdObject)
+	if err != nil {
+		log.Fatalf("Unable to decode Data Spreadsheet ID JSON: %v", err)
+	}
+
+	spreadsheetId := spreadsheetIdObject[spreadsheetTitle]
+	return spreadsheetId
 }
