@@ -1,4 +1,12 @@
 
+# 0.0.4
+Create new Sheet in spreadsheet
+- POST /createSheet
+- Creates a new sheet in an existing spreadsheet -- like a new table to a DB. Can add column headers (which act as properties of the DB's objects), but no data
+
+Added function to read N rows from sheet 
+- Made it so that it returns the row + number rather than just an index. Also now returns key-value pairs for each cell, mapping from columnHeader name to value.
+
 # 0.0.3
 Read Sheet data
 - GET /readSheetData

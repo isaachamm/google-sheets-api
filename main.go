@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -55,10 +56,14 @@ func main() {
 
 	// It's essential to understand Google's distinction between the term Spreadsheet (A Sheets document) and Sheet (an individual sheet, of which a spreadsheet may contain many). It may be helpful to think of a spreadsheet as a DB and a sheet as a table.
 
+	// GET endpoints
 	http.HandleFunc("GET /readSpreadsheetMetaData", readSpreadsheetMetaData)
 	http.HandleFunc("GET /readSheetData", readSheetData)
 
+	// POST endpoints
 	http.HandleFunc("POST /createSpreadsheet", createSpreadsheet)
+	http.HandleFunc("POST /createSheet", createSheet)
+	// http.HandleFunc("POST /addDataToSheet")
 
 	fmt.Println("Starting server . . .")
 	err = http.ListenAndServe("127.0.0.1:3333", nil)
@@ -90,36 +95,10 @@ func readSheetData(w http.ResponseWriter, r *http.Request) {
 		log.Fatalf("Unable to get spreadsheet from sheets service: %v", err)
 	}
 
-	var columnHeaders []string
-	var sheetData map[int][]string = make(map[int][]string)
-	for _, sheet := range spreadsheetToRead.Sheets {
-		if sheet.Properties.Title != sheetTitle {
-			continue
-		}
+	columnHeaders, sheetData, err := readNRowsFromSheetByTitle(10, sheetTitle, spreadsheetToRead)
 
-		if len(sheet.Data[0].RowData) == 0 {
-			w.WriteHeader(http.StatusNoContent)
-			w.Write([]byte("No data available in requested Spreadsheet: " + spreadsheetTitle + ": " + sheetTitle))
-			break
-		}
-
-		for index, row := range sheet.Data[0].RowData {
-			if index > 10 {
-				break
-			}
-
-			if index == 0 {
-				for _, rowValue := range row.Values {
-					columnHeaders = append(columnHeaders, rowValue.FormattedValue)
-				}
-				continue
-			}
-
-			for _, rowValue := range row.Values {
-				sheetData[index] = append(sheetData[index], rowValue.FormattedValue)
-			}
-		}
-		break
+	if err != nil {
+		log.Fatalf("Error while reading rows from sheet: %v", err)
 	}
 
 	if columnHeaders == nil {
@@ -265,6 +244,102 @@ func createSpreadsheet(w http.ResponseWriter, r *http.Request) {
 
 }
 
+type SheetCreationHttpRequest struct {
+	SpreadsheetTitle      string
+	NewSheetTitle         string
+	NewSheetColumnHeaders []string
+}
+
+func createSheet(w http.ResponseWriter, r *http.Request) {
+
+	// This step is necessary so that we can get the request body as a byte array to pass to json.Unmarshal()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Fatalf("Unable to parse request body. Error: %v", err)
+	}
+
+	requestBody := new(SheetCreationHttpRequest)
+	err = json.Unmarshal([]byte(body), &requestBody)
+	if err != nil {
+		log.Fatalf("Unable to unmarshal request body JSON. Error: %v", err)
+	}
+
+	var newSheetTitle string = requestBody.NewSheetTitle
+	var spreadsheetTitle string = requestBody.SpreadsheetTitle
+	var columnHeadersStrings []string = requestBody.NewSheetColumnHeaders
+
+	var newColumnHeaders []*sheets.CellData = make([]*sheets.CellData, 0)
+	for _, header := range columnHeadersStrings {
+		newHeader := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &header}}
+		newColumnHeaders = append(newColumnHeaders, newHeader)
+	}
+
+	spreadsheetId := getSpreadsheetId(spreadsheetTitle)
+
+	appendSheetResponse, err := sheetsService.Spreadsheets.BatchUpdate(spreadsheetId,
+		&sheets.BatchUpdateSpreadsheetRequest{
+			IncludeSpreadsheetInResponse: true,
+			Requests: []*sheets.Request{
+				{
+					AddSheet: &sheets.AddSheetRequest{
+						Properties: &sheets.SheetProperties{
+							Title: newSheetTitle,
+						},
+					},
+				},
+			},
+		},
+	).Do()
+
+	if err != nil {
+		fmt.Printf("Error while trying to add sheet to spreadsheet: %v\n", err)
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte("Error while trying to add sheet to spreadsheet"))
+		return
+	}
+
+	appendCellsResponse, err := sheetsService.Spreadsheets.BatchUpdate(spreadsheetId,
+		&sheets.BatchUpdateSpreadsheetRequest{
+			IncludeSpreadsheetInResponse: true,
+			Requests: []*sheets.Request{
+				{
+					AppendCells: &sheets.AppendCellsRequest{
+						Fields: "*",
+						Rows: []*sheets.RowData{
+							{
+								Values: newColumnHeaders,
+							},
+						},
+						SheetId: appendSheetResponse.Replies[0].AddSheet.Properties.SheetId,
+					},
+				},
+			},
+		},
+	).Do()
+
+	if err != nil {
+		fmt.Printf("Error while trying to add sheet headers: %v\n", err)
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(string("Error while trying to add sheet headers")))
+		return
+	}
+
+	var responseBody map[string]any = make(map[string]any)
+
+	responseBody["SpreadsheetID"] = appendCellsResponse.SpreadsheetId
+	responseBody["NewSheetTitle"] = appendSheetResponse.Replies[0].AddSheet.Properties.Title
+	responseBody["SpreadsheetUrl"] = appendCellsResponse.UpdatedSpreadsheet.SpreadsheetUrl
+	// This isn't perfect because we're trusting that the data got applied rather than checking it, but it should be guaranteed to update with a non-error response, so good if not perfect. Not worth a third network call imo.
+	responseBody["ColumnHeaders"] = columnHeadersStrings
+
+	responseBodyBytes, err := json.Marshal(responseBody)
+	if err != nil {
+		log.Fatalf("Error turning response body to JSON bytes. Error: %v", err)
+	}
+	w.WriteHeader(http.StatusCreated)
+	w.Write(responseBodyBytes)
+}
+
 func getSpreadsheetId(spreadsheetTitle string) string {
 	spreadsheetJsonFilePath := "data/spreadsheetIDs.json"
 	spreadsheetJsonFile, err := os.ReadFile(spreadsheetJsonFilePath)
@@ -280,4 +355,47 @@ func getSpreadsheetId(spreadsheetTitle string) string {
 
 	spreadsheetId := spreadsheetIdObject[spreadsheetTitle]
 	return spreadsheetId
+}
+
+/*
+return values: columnHeaders string[], sheetData map[int][]string, error
+*/
+func readNRowsFromSheetByTitle(numRows int, sheetTitle string, spreadsheet *sheets.Spreadsheet) ([]string, map[string]map[string]string, error) {
+	var columnHeaders []string
+	var sheetData map[string]map[string]string = make(map[string]map[string]string)
+	for _, sheet := range spreadsheet.Sheets {
+		if sheet.Properties.Title != sheetTitle {
+			continue
+		}
+
+		if len(sheet.Data) == 0 {
+			return columnHeaders, sheetData, nil
+		}
+
+		for index, row := range sheet.Data[0].RowData {
+			if index > numRows {
+				break
+			}
+
+			if index == 0 {
+				for _, rowValue := range row.Values {
+					columnHeaders = append(columnHeaders, rowValue.FormattedValue)
+				}
+				continue
+			}
+
+			var newRow map[string]string = make(map[string]string)
+			for columnIndex, rowValue := range row.Values {
+				newRow[columnHeaders[columnIndex]] = rowValue.FormattedValue
+			}
+			sheetData[fmt.Sprintf("Row%v", index)] = newRow
+		}
+		break
+	}
+
+	if columnHeaders == nil {
+		return nil, nil, errors.New("Unable to find requested sheet " + sheetTitle + " in " + spreadsheet.Properties.Title)
+	}
+
+	return columnHeaders, sheetData, nil
 }
