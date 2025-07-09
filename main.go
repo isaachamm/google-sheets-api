@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
@@ -63,7 +64,7 @@ func main() {
 	// POST endpoints
 	http.HandleFunc("POST /createSpreadsheet", createSpreadsheet)
 	http.HandleFunc("POST /createSheet", createSheet)
-	// http.HandleFunc("POST /addDataToSheet")
+	http.HandleFunc("POST /addObjectToSheet", addObjectToSheet)
 
 	fmt.Println("Starting server . . .")
 	err = http.ListenAndServe("127.0.0.1:3333", nil)
@@ -189,15 +190,15 @@ func createSpreadsheet(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Could not find any files in the drive"))
 		return
 
-	} else {
-		for _, i := range fileList.Files {
-			if i.Name == newTitle {
-				fmt.Printf("%s (%s)\n", i.Name, i.Id)
-				fmt.Println("Request received with sheet title already exists (Status 409)")
-				w.WriteHeader(http.StatusConflict)
-				w.Write([]byte("Sheet title already exists, please choose another"))
-				return
-			}
+	}
+
+	for _, i := range fileList.Files {
+		if i.Name == newTitle {
+			fmt.Printf("%s (%s)\n", i.Name, i.Id)
+			fmt.Println("Request received with sheet title already exists (Status 409)")
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte("Sheet title already exists, please choose another"))
+			return
 		}
 	}
 
@@ -269,6 +270,11 @@ func createSheet(w http.ResponseWriter, r *http.Request) {
 	var columnHeadersStrings []string = requestBody.NewSheetColumnHeaders
 
 	var newColumnHeaders []*sheets.CellData = make([]*sheets.CellData, 0)
+
+	idString := "id"
+	idHeader := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &idString}}
+	newColumnHeaders = append(newColumnHeaders, idHeader)
+
 	for _, header := range columnHeadersStrings {
 		newHeader := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &header}}
 		newColumnHeaders = append(newColumnHeaders, newHeader)
@@ -328,7 +334,7 @@ func createSheet(w http.ResponseWriter, r *http.Request) {
 
 	responseBody["SpreadsheetID"] = appendCellsResponse.SpreadsheetId
 	responseBody["NewSheetTitle"] = appendSheetResponse.Replies[0].AddSheet.Properties.Title
-	responseBody["SpreadsheetUrl"] = appendCellsResponse.UpdatedSpreadsheet.SpreadsheetUrl
+	responseBody["SpreadsheetUrl"] = buildSpreadsheetUrl(spreadsheetId, appendSheetResponse.Replies[0].AddSheet.Properties.SheetId)
 	// This isn't perfect because we're trusting that the data got applied rather than checking it, but it should be guaranteed to update with a non-error response, so good if not perfect. Not worth a third network call imo.
 	responseBody["ColumnHeaders"] = columnHeadersStrings
 
@@ -338,6 +344,94 @@ func createSheet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusCreated)
 	w.Write(responseBodyBytes)
+}
+
+type AddObjectToSheetRequest struct {
+	SpreadsheetTitle string
+	SheetTitle       string
+	NewObject        []string
+}
+
+func addObjectToSheet(w http.ResponseWriter, r *http.Request) {
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Fatalf("Unable to parse request body. Error: %v", err)
+	}
+
+	requestBody := new(AddObjectToSheetRequest)
+	err = json.Unmarshal([]byte(body), &requestBody)
+	if err != nil {
+		log.Fatalf("Unable to unmarshal request body JSON. Error: %v", err)
+	}
+
+	var spreadsheetTitle string = requestBody.SpreadsheetTitle
+	var sheetTitle string = requestBody.SheetTitle
+	var newObject []string = requestBody.NewObject
+
+	spreadsheetId := getSpreadsheetId(spreadsheetTitle)
+	spreadsheet, err := sheetsService.Spreadsheets.Get(spreadsheetId).Do(googleapi.QueryParameter("includeGridData", "true"))
+	if err != nil {
+		fmt.Printf("Unable to get spreadsheet from sheets service: %v", err)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write(fmt.Appendf(nil, "Unable to get spreadsheet from sheets service: %v", err))
+		return
+	}
+
+	sheetIndex := slices.IndexFunc(spreadsheet.Sheets, func(s *sheets.Sheet) bool {
+		return s.Properties.Title == sheetTitle
+	})
+	var sheetId int64 = spreadsheet.Sheets[sheetIndex].Properties.SheetId
+
+	var newObjectData []*sheets.CellData = make([]*sheets.CellData, 0)
+
+	// Make an objectId that is incremental according to row length and store it in the first column
+	var newObjectId float64 = float64(len(spreadsheet.Sheets[sheetIndex].Data[0].RowData) + 1)
+	newObjectIdData := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{NumberValue: &newObjectId}}
+	newObjectData = append(newObjectData, newObjectIdData)
+
+	for _, value := range newObject {
+		newValue := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &value}}
+		newObjectData = append(newObjectData, newValue)
+	}
+
+	_, err = sheetsService.Spreadsheets.BatchUpdate(spreadsheetId,
+		&sheets.BatchUpdateSpreadsheetRequest{
+			IncludeSpreadsheetInResponse: false,
+			Requests: []*sheets.Request{
+				{
+					AppendCells: &sheets.AppendCellsRequest{
+						Fields: "*",
+						Rows: []*sheets.RowData{
+							{
+								Values: newObjectData,
+							},
+						},
+						SheetId: sheetId,
+					},
+				},
+			},
+		},
+	).Do()
+
+	if err != nil {
+		fmt.Printf("Error while trying to add sheet headers: %v\n", err)
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(string("Error while trying to add sheet headers")))
+		return
+	}
+
+	var responseBody map[string]any = make(map[string]any)
+
+	responseBody["SheetUrl"] = buildSpreadsheetUrl(spreadsheetId, sheetId)
+
+	responseBodyBytes, err := json.Marshal(responseBody)
+	if err != nil {
+		log.Fatalf("Error turning response body to JSON bytes. Error: %v", err)
+	}
+	w.WriteHeader(http.StatusCreated)
+	w.Write(responseBodyBytes)
+
 }
 
 func getSpreadsheetId(spreadsheetTitle string) string {
@@ -355,6 +449,10 @@ func getSpreadsheetId(spreadsheetTitle string) string {
 
 	spreadsheetId := spreadsheetIdObject[spreadsheetTitle]
 	return spreadsheetId
+}
+
+func buildSpreadsheetUrl(spreadsheetId string, sheetId int64) string {
+	return fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s?gid=%d", spreadsheetId, sheetId)
 }
 
 /*

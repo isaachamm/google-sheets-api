@@ -21,6 +21,18 @@ Return body:
 - string: SpreadsheetID
 - string: SpreadsheetUrl
 
+## Add new object to sheet
+
+URL: `POST /addObjectToSheet`
+
+Request body:
+- string: SpreadsheetTitle
+- string: SheetTitle
+- []string: NewObject
+
+Return body:
+- string: SheetUrl
+
 ----
 
 # Get Endpoints
