@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"time"
 
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
@@ -21,6 +22,8 @@ import (
 
 	// Drive API
 	"google.golang.org/api/drive/v3"
+
+	"github.com/google/uuid"
 )
 
 var sheetsService *sheets.Service
@@ -271,9 +274,8 @@ func createSheet(w http.ResponseWriter, r *http.Request) {
 
 	var newColumnHeaders []*sheets.CellData = make([]*sheets.CellData, 0)
 
-	idString := "id"
-	idHeader := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &idString}}
-	newColumnHeaders = append(newColumnHeaders, idHeader)
+	// Prepend id and datetime columns
+	columnHeadersStrings = append([]string{"id", "datetime"}, columnHeadersStrings...)
 
 	for _, header := range columnHeadersStrings {
 		newHeader := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &header}}
@@ -385,10 +387,17 @@ func addObjectToSheet(w http.ResponseWriter, r *http.Request) {
 
 	var newObjectData []*sheets.CellData = make([]*sheets.CellData, 0)
 
-	// Make an objectId that is incremental according to row length and store it in the first column
-	var newObjectId float64 = float64(len(spreadsheet.Sheets[sheetIndex].Data[0].RowData) + 1)
-	newObjectIdData := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{NumberValue: &newObjectId}}
+	// Make a uuid store it in the first column
+	newObjectId := uuid.New().String()
+	newObjectIdData := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &newObjectId}}
 	newObjectData = append(newObjectData, newObjectIdData)
+
+	// Make a timestamp and store it in the second column
+	currLocalTime := time.Now().Local()
+	timezone, _ := currLocalTime.Zone()
+	timestamp := fmt.Sprintf("%s %s", currLocalTime.Format(time.RFC3339), timezone)
+	newObjectTimestampData := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &timestamp}}
+	newObjectData = append(newObjectData, newObjectTimestampData)
 
 	for _, value := range newObject {
 		newValue := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &value}}

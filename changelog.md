@@ -1,3 +1,7 @@
+# 0.0.6
+
+Changed Object IDs to be UUIDs and added creation timestamp to sheets as well
+
 # 0.0.5
 
 ## Add data to sheet
