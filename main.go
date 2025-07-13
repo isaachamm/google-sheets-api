@@ -69,6 +69,9 @@ func main() {
 	http.HandleFunc("POST /createSheet", createSheet)
 	http.HandleFunc("POST /addObjectToSheet", addObjectToSheet)
 
+	// DELETE endpoints
+	http.HandleFunc("DELETE /deleteObject", deleteObject)
+
 	fmt.Println("Starting server . . .")
 	err = http.ListenAndServe("127.0.0.1:3333", nil)
 
@@ -162,6 +165,71 @@ func readSpreadsheetMetaData(w http.ResponseWriter, r *http.Request) {
 		log.Fatalf("Error turning response body to JSON bytes. Error: %v", err)
 	}
 	w.WriteHeader(http.StatusOK)
+	w.Write(responseBodyBytes)
+
+}
+
+func deleteObject(w http.ResponseWriter, r *http.Request) {
+	u, err := url.Parse(r.URL.String())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	queryParams := u.Query()
+
+	objectToDeleteId := queryParams.Get("objectId")
+	spreadsheetTitle := queryParams.Get("spreadsheetTitle")
+	sheetTitle := queryParams.Get("sheetTitle")
+
+	spreadsheetId := getSpreadsheetId(spreadsheetTitle)
+	spreadsheet, err := sheetsService.Spreadsheets.Get(spreadsheetId).Do(googleapi.QueryParameter("includeGridData", "true"))
+	if err != nil {
+		log.Fatalf("Unable to get spreadsheet from sheets service: %v", err)
+	}
+
+	rowIndexToDelete := findRowIndexByObjectId(objectToDeleteId, sheetTitle, spreadsheet)
+	sheetId := getSheetId(sheetTitle, spreadsheet)
+
+	// We check for 0 because this should always be the "id" column header, and 0 is initialized. In other words, if this is 0, then no object was found
+	if (rowIndexToDelete == 0) {
+		log.Printf("Object not found: %s", objectToDeleteId)
+	}
+
+	_, err = sheetsService.Spreadsheets.BatchUpdate(spreadsheetId,
+		&sheets.BatchUpdateSpreadsheetRequest{
+			IncludeSpreadsheetInResponse: false,
+			Requests: []*sheets.Request{
+				{
+					DeleteRange: &sheets.DeleteRangeRequest{
+						Range: &sheets.GridRange{
+							StartRowIndex: rowIndexToDelete,
+							EndRowIndex: rowIndexToDelete + 1,
+							SheetId: sheetId,
+						},
+						ShiftDimension: "ROWS",
+					},
+				},
+			},
+		},
+	).Do()
+
+	if (err != nil) {
+		fmt.Printf("Error while trying to delete object from sheet: %v\n", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(string("Error while trying to delete object from sheet")))
+		return
+	}
+
+	var responseBody map[string]any = make(map[string]any)
+
+	responseBody["SheetUrl"] = buildSpreadsheetUrl(spreadsheetId, sheetId)
+
+	responseBodyBytes, err := json.Marshal(responseBody)
+	if err != nil {
+		log.Fatalf("Error turning response body to JSON bytes. Error: %v", err)
+	}
+	w.WriteHeader(http.StatusCreated)
 	w.Write(responseBodyBytes)
 
 }
@@ -380,14 +448,11 @@ func addObjectToSheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sheetIndex := slices.IndexFunc(spreadsheet.Sheets, func(s *sheets.Sheet) bool {
-		return s.Properties.Title == sheetTitle
-	})
-	var sheetId int64 = spreadsheet.Sheets[sheetIndex].Properties.SheetId
+	sheetId := getSheetId(sheetTitle, spreadsheet)
 
 	var newObjectData []*sheets.CellData = make([]*sheets.CellData, 0)
 
-	// Make a uuid store it in the first column
+	// Make a uuid and store it in the first column
 	newObjectId := uuid.New().String()
 	newObjectIdData := &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &newObjectId}}
 	newObjectData = append(newObjectData, newObjectIdData)
@@ -460,8 +525,41 @@ func getSpreadsheetId(spreadsheetTitle string) string {
 	return spreadsheetId
 }
 
+func getSheetId(sheetTitle string, spreadsheet *sheets.Spreadsheet) int64 {
+	sheetIndex := slices.IndexFunc(spreadsheet.Sheets, func(s *sheets.Sheet) bool {
+		return s.Properties.Title == sheetTitle
+	})
+	var sheetId int64 = spreadsheet.Sheets[sheetIndex].Properties.SheetId
+	return sheetId
+}
+
 func buildSpreadsheetUrl(spreadsheetId string, sheetId int64) string {
 	return fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s?gid=%d", spreadsheetId, sheetId)
+}
+
+func findRowIndexByObjectId(objectId string, sheetTitle string, spreadsheet *sheets.Spreadsheet) int64 {
+
+	var rowIndex int64
+
+	for _, sheet := range spreadsheet.Sheets {
+		if sheet.Properties.Title == sheetTitle {
+			if len(sheet.Data) == 0 {
+				return rowIndex
+			}
+			
+			for index, row := range sheet.Data[0].RowData {
+				
+				if (row.Values[0].FormattedValue == objectId) {
+					rowIndex = int64(index)
+					break
+				}
+			}
+			break
+		}
+
+	}
+
+	return rowIndex
 }
 
 /*

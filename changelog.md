@@ -1,3 +1,16 @@
+# 0.0.7
+
+## Delete object from sheet
+
+Make it possible to delete objects from a spreadsheet (and keep the spreadsheet clean)
+
+DELETE /deleteObject
+- Deletes an object (row) from a sheet, and shifts all of the other rows up.
+
+Requirements:
+- Delete object by object ID
+- Clear entire row and move the data up so there's no empty rows in the dataset
+
 # 0.0.6
 
 Changed Object IDs to be UUIDs and added creation timestamp to sheets as well
